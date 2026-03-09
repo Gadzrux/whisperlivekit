@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WhisperLiveKit Transcription Test</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, system-ui, sans-serif;
+      }
+
+      body {
+        margin: 0;
+        background: #111827;
+        color: #e5e7eb;
+      }
+
+      main {
+        max-width: 880px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 2rem;
+      }
+
+      p {
+        color: #cbd5e1;
+      }
+
+      .panel {
+        background: #1f2937;
+        border: 1px solid #374151;
+        border-radius: 14px;
+        padding: 18px;
+        margin-top: 20px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 14px;
+      }
+
+      @media (min-width: 720px) {
+        .grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      label {
+        display: block;
+        font-size: 0.95rem;
+        margin-bottom: 6px;
+      }
+
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 11px 12px;
+        border-radius: 10px;
+        border: 1px solid #4b5563;
+        background: #111827;
+        color: inherit;
+        font: inherit;
+      }
+
+      .actions {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 16px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 11px 16px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: #22c55e;
+        color: #052e16;
+      }
+
+      button.secondary {
+        background: #374151;
+        color: #f9fafb;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .status {
+        margin-top: 16px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: #0f172a;
+        border: 1px solid #334155;
+        color: #bfdbfe;
+        white-space: pre-wrap;
+      }
+
+      .transcripts {
+        min-height: 180px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .empty {
+        color: #94a3b8;
+      }
+
+      .transcript {
+        background: #0f172a;
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 12px 14px;
+      }
+
+      .meta {
+        color: #93c5fd;
+        font-size: 0.85rem;
+        margin-bottom: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Transcription Test</h1>
+      <p>
+        Speak into your microphone and watch transcripts appear in real time
+        via WhisperLive.
+      </p>
+
+      <section class="panel">
+        <div class="grid">
+          <div>
+            <label for="language">Language</label>
+            <input id="language" name="language" value="hi" />
+          </div>
+          <div>
+            <label for="model">Model</label>
+            <input id="model" name="model" value="large-v3" />
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="connectBtn" class="primary">Start Mic</button>
+          <button id="disconnectBtn" class="secondary" disabled>Stop</button>
+          <button id="clearBtn" class="secondary">Clear Transcripts</button>
+        </div>
+
+        <div id="status" class="status">Loading configuration...</div>
+      </section>
+
+      <section class="panel">
+        <h2>Transcripts</h2>
+        <div id="transcripts" class="transcripts">
+          <div class="empty">No transcripts yet.</div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const languageInput = document.getElementById("language");
+      const modelInput = document.getElementById("model");
+      const connectBtn = document.getElementById("connectBtn");
+      const disconnectBtn = document.getElementById("disconnectBtn");
+      const clearBtn = document.getElementById("clearBtn");
+      const statusEl = document.getElementById("status");
+      const transcriptsEl = document.getElementById("transcripts");
+
+      let ws = null;
+      let audioCtx = null;
+      let micStream = null;
+      let scriptNode = null;
+      let sending = false;
+      let chunksSent = 0;
+
+      const TARGET_SR = 16000;
+
+      function setStatus(message) {
+        statusEl.textContent = message;
+      }
+
+      function setConnectedState(connected) {
+        connectBtn.disabled = connected;
+        disconnectBtn.disabled = !connected;
+        languageInput.disabled = connected;
+        modelInput.disabled = connected;
+      }
+
+      function renderEmptyState() {
+        transcriptsEl.innerHTML = '<div class="empty">No transcripts yet.</div>';
+      }
+
+      function addTranscript(text) {
+        const empty = transcriptsEl.querySelector(".empty");
+        if (empty) empty.remove();
+
+        const item = document.createElement("div");
+        item.className = "transcript";
+
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = new Date().toLocaleTimeString();
+
+        const body = document.createElement("div");
+        body.textContent = text;
+
+        item.append(meta, body);
+        transcriptsEl.prepend(item);
+      }
+
+      function resample(input, srcRate, dstRate) {
+        if (srcRate === dstRate) return input;
+        const ratio = dstRate / srcRate;
+        const outLen = Math.round(input.length * ratio);
+        const out = new Float32Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+          const srcIdx = i / ratio;
+          const idx0 = Math.floor(srcIdx);
+          const idx1 = Math.min(idx0 + 1, input.length - 1);
+          const frac = srcIdx - idx0;
+          out[i] = input[idx0] * (1 - frac) + input[idx1] * frac;
+        }
+        return out;
+      }
+
+      async function connect() {
+        setStatus("Requesting microphone access...");
+        connectBtn.disabled = true;
+        chunksSent = 0;
+
+        try {
+          micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              echoCancellation: true,
+              noiseSuppression: true,
+            },
+          });
+
+          const trackSettings = micStream.getAudioTracks()[0].getSettings();
+          const micRate = trackSettings.sampleRate || 48000;
+          console.log("[audio] Mic sample rate:", micRate);
+
+          audioCtx = new AudioContext({ sampleRate: micRate });
+          console.log("[audio] AudioContext sample rate:", audioCtx.sampleRate);
+
+          const source = audioCtx.createMediaStreamSource(micStream);
+
+          // Use ScriptProcessorNode (4096 buffer, mono in, mono out)
+          scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
+
+          scriptNode.onaudioprocess = (e) => {
+            if (!sending) return;
+
+            const input = e.inputBuffer.getChannelData(0);
+            // Copy output so the node stays alive
+            e.outputBuffer.getChannelData(0).set(input);
+
+            const resampled = resample(input, audioCtx.sampleRate, TARGET_SR);
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(resampled.buffer);
+              chunksSent++;
+              if (chunksSent % 50 === 0) {
+                console.log(`[audio] Sent ${chunksSent} chunks (${(chunksSent * resampled.length / TARGET_SR).toFixed(1)}s of audio)`);
+              }
+            }
+          };
+
+          source.connect(scriptNode);
+          scriptNode.connect(audioCtx.destination);
+
+          // Open WebSocket
+          const proto = location.protocol === "https:" ? "wss:" : "ws:";
+          const wsUrl = `${proto}//${location.host}/ws/transcribe`;
+          console.log("[ws] Connecting to", wsUrl);
+          ws = new WebSocket(wsUrl);
+          ws.binaryType = "arraybuffer";
+
+          ws.onopen = () => {
+            console.log("[ws] Connected");
+            setStatus("Connected, waiting for server...");
+          };
+
+          ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            console.log("[ws] Received:", msg);
+
+            if (msg.type === "status" && msg.status === "ready") {
+              sending = true;
+              setStatus("Listening... Speak now.");
+              setConnectedState(true);
+              console.log("[audio] Started sending audio");
+            } else if (msg.type === "transcript" && msg.text) {
+              addTranscript(msg.text);
+            } else if (msg.type === "error") {
+              setStatus(`Error: ${msg.message}`);
+              disconnect();
+            }
+          };
+
+          ws.onclose = (e) => {
+            console.log("[ws] Closed:", e.code, e.reason);
+            sending = false;
+            setStatus("Server connection closed.");
+            cleanupAudio();
+            setConnectedState(false);
+          };
+
+          ws.onerror = (e) => {
+            console.error("[ws] Error:", e);
+            sending = false;
+            setStatus("WebSocket error.");
+            cleanupAudio();
+            setConnectedState(false);
+          };
+        } catch (error) {
+          console.error("[connect] Error:", error);
+          setStatus(`Failed: ${error.message}`);
+          cleanupAudio();
+          setConnectedState(false);
+        }
+      }
+
+      function cleanupAudio() {
+        sending = false;
+        if (scriptNode) {
+          scriptNode.onaudioprocess = null;
+          scriptNode.disconnect();
+          scriptNode = null;
+        }
+        if (audioCtx) {
+          audioCtx.close();
+          audioCtx = null;
+        }
+        if (micStream) {
+          micStream.getTracks().forEach((t) => t.stop());
+          micStream = null;
+        }
+      }
+
+      function disconnect() {
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
+        }
+        cleanupAudio();
+        setConnectedState(false);
+        setStatus("Stopped.");
+      }
+
+      connectBtn.addEventListener("click", () => void connect());
+      disconnectBtn.addEventListener("click", () => disconnect());
+      clearBtn.addEventListener("click", () => renderEmptyState());
+
+      // Load config
+      async function loadConfig() {
+        try {
+          const res = await fetch("/config");
+          const cfg = await res.json();
+          if (cfg.whisperlive_language) languageInput.value = cfg.whisperlive_language;
+          if (cfg.whisperlive_model) modelInput.value = cfg.whisperlive_model;
+          setStatus("Ready. Click 'Start Mic' to begin transcription.");
+        } catch (e) {
+          setStatus("Ready. Click 'Start Mic' to begin transcription.");
+        }
+      }
+
+      renderEmptyState();
+      loadConfig();
+    </script>
+  </body>
+</html>

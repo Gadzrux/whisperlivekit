@@ -1,0 +1,35 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    env_file:
+      - .env
+    environment:
+      WHISPERLIVE_WS_URL: ws://whisperlive:9090
+    ports:
+      - "8080:8080"
+    depends_on:
+      - whisperlive
+    restart: unless-stopped
+
+  whisperlive:
+    image: ghcr.io/collabora/whisperlive-gpu:latest
+    ports:
+      - "9090:9090"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    volumes:
+      - whisperlive-cache:/root/.cache
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  whisperlive-cache:
